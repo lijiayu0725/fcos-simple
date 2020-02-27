@@ -9,10 +9,10 @@ from torch.optim import SGD
 from torch.optim.lr_scheduler import LambdaLR
 
 from data import DataIterator
-from model import RetinaNet
+from model import FCOS
 
-warmup = 1000
-warmup_ratio = 0.1
+warmup = 500
+warmup_ratio = 1. / 3
 gamma = 0.1
 milestores = [8, 11]
 batch_size = 16
@@ -22,13 +22,13 @@ weight_decay = 1e-4
 momentem = 0.9
 epochs = 12
 shuffle = False
-resize = (640, 1024)
+resize = 800
 resnet_dir = '/home/lijiayu/.cache/torch/checkpoints/resnet50-19c8e357.pth'
 coco_dir = '/data/datasets/coco2017'
 mb_to_gb_factor = 1024 ** 3
 dist = True
 world_size = 8
-loss_scale = 128.
+loss_scale = None
 max_norm = 35
 
 
@@ -38,8 +38,7 @@ def train(model, rank=0):
     optimizer = SGD(model.parameters(), lr=lr, weight_decay=weight_decay, momentum=momentem)
 
     model, optimizer = amp.initialize(model, optimizer,
-                                      opt_level='O2',
-                                      keep_batchnorm_fp32=True,
+                                      opt_level='O0',
                                       loss_scale=loss_scale)
 
     model = DistributedDataParallel(model)
@@ -52,7 +51,7 @@ def train(model, rank=0):
         print('finish loading dataset!')
 
     def schedule_warmup(i):
-        return (1. - warmup_ratio) * i / warmup + warmup_ratio
+        return warmup_ratio if i < warmup else 1
 
     def schedule(epoch):
         return gamma ** len([m for m in milestores if m <= epoch])
@@ -63,14 +62,14 @@ def train(model, rank=0):
         print('starting training...')
 
     for epoch in range(1, epochs + 1):
-        cls_losses, box_losses = [], []
+        cls_losses, box_losses, centerness_losses = [], [], []
         if epoch != 1:
             scheduler.step(epoch)
         for i, (data, target) in enumerate(data_iterator, start=1):
             optimizer.zero_grad()
-            cls_loss, box_loss = model([data, target])
+            cls_loss, box_loss, centerness_loss = model([data, target])
 
-            with amp.scale_loss(cls_loss + box_loss, optimizer) as scaled_loss:
+            with amp.scale_loss(cls_loss + box_loss + centerness_loss, optimizer) as scaled_loss:
                 scaled_loss.backward()
 
             # torch.nn.utils.clip_grad_norm_(amp.master_params(optimizer), max_norm)
@@ -78,33 +77,38 @@ def train(model, rank=0):
             if epoch == 1 and i <= warmup:
                 scheduler_warmup.step(i)
 
-            cls_loss, box_loss = cls_loss.mean().clone(), box_loss.mean().clone()
+            cls_loss, box_loss, centerness_loss = cls_loss.mean().clone(), box_loss.mean().clone(), centerness_loss.mean().clone()
             torch.distributed.all_reduce(cls_loss)
             torch.distributed.all_reduce(box_loss)
+            torch.distributed.all_reduce(centerness_loss)
             cls_loss /= world_size
             box_loss /= world_size
+            centerness_loss /= world_size
             if rank == 0:
                 cls_losses.append(cls_loss)
                 box_losses.append(box_loss)
+                centerness_losses.append(centerness_loss)
 
-            if rank == 0 and not isfinite(cls_loss + box_loss):
+            if rank == 0 and not isfinite(cls_loss + box_loss + centerness_loss):
                 raise RuntimeError('Loss is diverging!')
 
-            del cls_loss, box_loss, target, data
+            del cls_loss, box_loss, centerness_loss, target, data
 
             if rank == 0 and i % 10 == 0:
                 focal_loss = torch.FloatTensor(cls_losses).mean().item()
                 box_loss = torch.FloatTensor(box_losses).mean().item()
+                centerness_loss = torch.FloatTensor(centerness_losses).mean().item()
                 learning_rate = optimizer.param_groups[0]['lr']
 
                 msg = '[{:{len}}/{}]'.format(epoch, epochs, len=len(str(epochs)))
                 msg += '[{:{len}}/{}]'.format(i, len(data_iterator), len=len(str(len(data_iterator))))
                 msg += ' focal loss: {:.3f}'.format(focal_loss)
                 msg += ', box loss: {:.3f}'.format(box_loss)
+                msg += ', centerness loss: {:.3f}'.format(centerness_loss)
                 msg += ', lr: {:.2g}'.format(learning_rate)
                 msg += ', cuda_memory: {:.3g} GB'.format(torch.cuda.memory_cached() / mb_to_gb_factor)
                 print(msg, flush=True)
-                del cls_losses[:], box_losses[:], focal_loss, box_loss
+                del cls_losses[:], box_losses[:], centerness_losses[:], focal_loss, box_loss, centerness_loss
 
         if rank == 0:
             print('saving model for epoch {}'.format(epoch))
@@ -126,7 +130,7 @@ if __name__ == '__main__':
     if args.distributed:
         torch.cuda.set_device(args.local_rank)
         torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    model = RetinaNet(state_dict_path=resnet_dir, stride=stride)
+    model = FCOS(state_dict_path=resnet_dir)
     if args.local_rank == 0:
         print('FPN initialized!')
     train(model, args.local_rank)

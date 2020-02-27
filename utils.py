@@ -50,18 +50,6 @@ def nms(all_scores, all_boxes, all_classes, nms=0.5, ndetections=100):
 
     return out_scores, out_boxes, out_classes
 
-class Scale(nn.Module):
-    """
-    A learnable scale parameter
-    """
-
-    def __init__(self, scale=1.0):
-        super(Scale, self).__init__()
-        self.scale = nn.Parameter(torch.tensor(scale, dtype=torch.float))
-
-    def forward(self, x):
-        return x * self.scale
-
 def bias_init_with_prob(prior_prob):
     """ initialize conv/fc bias value according to giving probablity"""
     bias_init = float(math.log((1 - prior_prob) / prior_prob))

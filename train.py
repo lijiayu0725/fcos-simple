@@ -68,13 +68,12 @@ def train(model, rank=0):
             if epoch == 1 and i <= warmup:
                 scheduler_warmup.step(i)
 
-            cls_loss, box_loss, centerness_loss = cls_loss.mean().clone(), box_loss.mean().clone(), centerness_loss.mean.clone()
+            cls_loss, box_loss, centerness_loss = cls_loss.mean().clone(), box_loss.mean().clone(), centerness_loss.mean().clone()
 
             if rank == 0:
                 cls_losses.append(cls_loss)
                 box_losses.append(box_loss)
                 centerness_losses.append(centerness_loss)
-
 
             if rank == 0 and not isfinite(cls_loss + box_loss + centerness_loss):
                 raise RuntimeError('Loss is diverging!')

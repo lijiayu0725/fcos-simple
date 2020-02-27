@@ -40,3 +40,4 @@ class IoULoss(nn.Module):
         if weight is not None:
             loss *= weight
         return loss
+

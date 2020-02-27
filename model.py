@@ -1,11 +1,12 @@
 import math
 import torch
 from torch import nn
+from torch.nn import functional as F
 
 from fpn import ResNet50FPN
 
 from loss import FocalLoss, IoULoss
-from utils import Scale, bias_init_with_prob, distance2bbox, to_onehot
+from utils import bias_init_with_prob, distance2bbox, to_onehot
 
 INF = 1e8
 
@@ -44,8 +45,7 @@ class FCOS(nn.Module):
 
         self.cls_criterion = FocalLoss()
         self.box_criterion = IoULoss()
-        self.centerness_criterion = nn.CrossEntropyLoss()
-        self.scales = nn.ModuleList([Scale(1.0) for _ in range(5)])
+        self.centerness_criterion = nn.BCEWithLogitsLoss(reduction='none')
 
     def initialize(self):
         self.backbone.initialize()
@@ -83,7 +83,7 @@ class FCOS(nn.Module):
 
         cls_scores = [self.fcos_cls(t) for t in cls_heads]
         centerness_scores = [self.fcos_centerness(t) for t in cls_heads]
-        reg_scores = [s(self.fcos_reg(t)).float().exp() for t, s in zip(reg_heads, self.scales)]
+        reg_scores = [self.fcos_reg(t).float().exp() for t in reg_heads]
 
         if self.training:
             return self.loss(cls_scores, reg_scores, centerness_scores, targets.float())
@@ -108,7 +108,7 @@ class FCOS(nn.Module):
 
         pos_inds = flatten_labels.nonzero().reshape(-1)
         num_pos = len(pos_inds)
-        loss_cls = self.cls_criterion(flatten_cls_scores, to_onehot(flatten_labels)) / (num_imgs + num_pos)
+        loss_cls = self.cls_criterion(flatten_cls_scores, to_onehot(flatten_labels)).sum() / (num_imgs + num_pos)
 
         pos_bbox_preds = flatten_bbox_preds[pos_inds]
         pos_centerness = flatten_centerness[pos_inds]
@@ -124,12 +124,12 @@ class FCOS(nn.Module):
             loss_bbox = self.box_criterion(
                 pos_decoded_bbox_preds,
                 pos_decoded_target_preds,
-                weight=pos_centerness_targets) / pos_centerness_targets.sum()
-            loss_centerness = self.centerness_criterion(pos_centerness, pos_centerness_targets)
+                weight=pos_centerness_targets).sum() / pos_centerness_targets.sum()
+            loss_centerness = self.centerness_criterion(pos_centerness, pos_centerness_targets).mean()
         else:
             loss_bbox = pos_bbox_preds.sum()
             loss_centerness = pos_centerness.sum()
-        return loss_cls.sum(), loss_bbox.sum(), loss_centerness
+        return loss_cls, loss_bbox, loss_centerness
 
     def centerness_target(self, pos_bbox_targets):
         left_right = pos_bbox_targets[:, [0, 2]]
@@ -232,5 +232,5 @@ class FCOS(nn.Module):
 
     def train(self, mode=True):
         super(FCOS, self).train(mode)
-        self.fix_bn()
+
         return self

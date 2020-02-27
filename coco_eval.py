@@ -6,7 +6,7 @@ from apex import amp
 from pycocotools.cocoeval import COCOeval
 
 from data import DataIterator
-from model import RetinaNet
+from model import FCOS
 
 batch_size = 16
 stride = 32
@@ -114,7 +114,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     torch.cuda.set_device(args.local_rank)
     torch.distributed.init_process_group(backend='nccl', init_method='env://')
-    model = RetinaNet(state_dict_path=resnet_dir, stride=stride)
+    model = FCOS(state_dict_path=resnet_dir, stride=stride)
     if args.local_rank == 0:
         print('FPN initialized!')
     infer(model, args)
